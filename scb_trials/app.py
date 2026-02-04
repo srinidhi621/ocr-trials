@@ -7,9 +7,11 @@ Provides PDF upload, configuration, progress tracking, and output viewing.
 """
 
 import os
+import re
 import sys
 import json
 import time
+import base64
 import shutil
 import threading
 import traceback
@@ -18,7 +20,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, asdict
 
-from flask import Flask, request, jsonify, send_file, abort, Response
+from flask import Flask, request, jsonify, send_file, abort, Response, send_from_directory
 import markdown
 
 # Add project root to path
@@ -31,12 +33,13 @@ PORT = int(os.environ.get("PORT", 5001))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "./output"))
 UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", "./uploads"))
 STATE_FILE = Path(os.environ.get("STATE_FILE", "./.ui_state.json"))
+STATIC_DIR = Path(__file__).parent / "static"
 
 # Ensure directories exist
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static")
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max upload
 
 
@@ -200,6 +203,12 @@ def index():
     return HTML_TEMPLATE
 
 
+@app.route("/static/<path:filename>")
+def serve_static(filename):
+    """Serve static files."""
+    return send_from_directory(STATIC_DIR, filename)
+
+
 @app.route("/run", methods=["POST"])
 def start_run():
     """Upload PDF and start pipeline run."""
@@ -317,23 +326,40 @@ def get_outputs(run_id: str):
                 "download_url": f"/files/{run_id}/{rel_path}",
             }
             
-            # Categorize file type
-            if path.suffix == ".md":
+            # Categorize file type and priority
+            if "_extracted.md" in path.name:
                 file_info["type"] = "markdown"
+                file_info["category"] = "document"
+                file_info["priority"] = 0
+            elif "_signature_report.md" in path.name:
+                file_info["type"] = "markdown"
+                file_info["category"] = "signature"
+                file_info["priority"] = 1
+            elif path.suffix == ".md":
+                file_info["type"] = "markdown"
+                file_info["category"] = "other"
+                file_info["priority"] = 2
             elif path.suffix == ".json":
                 file_info["type"] = "json"
+                file_info["category"] = "data"
+                file_info["priority"] = 3
             elif path.suffix == ".log":
                 file_info["type"] = "log"
+                file_info["category"] = "log"
+                file_info["priority"] = 4
             elif path.suffix in [".png", ".jpg", ".jpeg"]:
                 file_info["type"] = "image"
+                file_info["category"] = "image"
+                file_info["priority"] = 5
             else:
                 file_info["type"] = "file"
+                file_info["category"] = "other"
+                file_info["priority"] = 6
             
             files.append(file_info)
     
-    # Sort: markdown first, then json, then others
-    type_order = {"markdown": 0, "json": 1, "log": 2, "image": 3, "file": 4}
-    files.sort(key=lambda f: (type_order.get(f["type"], 5), f["name"]))
+    # Sort by priority, then name
+    files.sort(key=lambda f: (f.get("priority", 99), f["name"]))
     
     return jsonify({"files": files})
 
@@ -361,11 +387,35 @@ def view_file(run_id: str, file_path: str):
         # Render markdown as HTML
         with open(full_path, "r", encoding="utf-8") as f:
             md_content = f.read()
+        
+        # Determine if this is a signature report (to embed images)
+        is_signature_report = "_signature_report" in full_path.name
+        is_extracted_doc = "_extracted.md" in full_path.name
+        
+        # Convert markdown to HTML
         html_content = markdown.markdown(
             md_content,
-            extensions=["tables", "fenced_code", "codehilite", "toc"]
+            extensions=["tables", "fenced_code", "codehilite", "toc", "md_in_html"]
         )
-        return MARKDOWN_TEMPLATE.replace("{{content}}", html_content).replace("{{title}}", full_path.name)
+        
+        # For signature reports, embed signature images as base64
+        if is_signature_report:
+            html_content = embed_signature_images(html_content, OUTPUT_DIR / run_id)
+        
+        # Choose template based on content type
+        if is_extracted_doc:
+            template = DOCUMENT_TEMPLATE
+        elif is_signature_report:
+            template = SIGNATURE_TEMPLATE
+        else:
+            template = MARKDOWN_TEMPLATE
+        
+        download_link = f'<a href="/files/{run_id}/{file_path}" class="download-btn">Download Markdown</a>'
+        
+        return (template
+                .replace("{{content}}", html_content)
+                .replace("{{title}}", full_path.name)
+                .replace("{{download_link}}", download_link))
     
     elif suffix == ".json":
         # Display JSON with syntax highlighting
@@ -392,6 +442,38 @@ def view_file(run_id: str, file_path: str):
     else:
         # Serve other files for download
         return send_file(full_path, as_attachment=True)
+
+
+def embed_signature_images(html_content: str, output_dir: Path) -> str:
+    """Embed signature images as base64 in the HTML content."""
+    signatures_dir = output_dir / "signatures"
+    if not signatures_dir.exists():
+        return html_content
+    
+    # Find all image references and embed them
+    def replace_image(match):
+        img_path = match.group(1)
+        # Handle relative paths
+        if img_path.startswith("signatures/"):
+            full_img_path = output_dir / img_path
+        else:
+            full_img_path = signatures_dir / img_path
+        
+        if full_img_path.exists():
+            try:
+                with open(full_img_path, "rb") as f:
+                    img_data = base64.b64encode(f.read()).decode("utf-8")
+                suffix = full_img_path.suffix.lower()[1:]
+                mime = f"image/{suffix}" if suffix != "jpg" else "image/jpeg"
+                return f'<img src="data:{mime};base64,{img_data}" alt="Signature"'
+            except Exception:
+                pass
+        return match.group(0)
+    
+    # Replace image src attributes
+    html_content = re.sub(r'<img src="([^"]+)"', replace_image, html_content)
+    
+    return html_content
 
 
 @app.route("/files/<run_id>/<path:file_path>")
@@ -477,66 +559,75 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             line-height: 1.6;
         }
         
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 2rem;
-        }
-        
-        header {
-            text-align: center;
-            margin-bottom: 2rem;
-            padding-bottom: 1rem;
+        /* Header with logo */
+        .top-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1rem 2rem;
             border-bottom: 1px solid var(--border);
-        }
-        
-        header h1 {
-            font-size: 1.75rem;
-            font-weight: 600;
-            margin-bottom: 0.5rem;
-        }
-        
-        header p {
-            color: var(--text-secondary);
-            font-size: 0.95rem;
-        }
-        
-        .main-grid {
-            display: grid;
-            grid-template-columns: 400px 1fr;
-            gap: 2rem;
-        }
-        
-        @media (max-width: 900px) {
-            .main-grid {
-                grid-template-columns: 1fr;
-            }
-        }
-        
-        .card {
             background: var(--bg-secondary);
-            border-radius: 12px;
-            padding: 1.5rem;
-            border: 1px solid var(--border);
         }
         
-        .card h2 {
-            font-size: 1.1rem;
-            margin-bottom: 1.25rem;
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+        }
+        
+        .logo-section img {
+            height: 36px;
+            width: auto;
+        }
+        
+        .app-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        
+        .app-subtitle {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        
+        /* Layout */
+        .main-layout {
+            display: flex;
+            min-height: calc(100vh - 70px);
+        }
+        
+        /* Left sidebar - pinned */
+        .sidebar {
+            width: 320px;
+            flex-shrink: 0;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            padding: 1.25rem;
+            overflow-y: auto;
+            position: sticky;
+            top: 0;
+            height: calc(100vh - 70px);
+        }
+        
+        .sidebar h2 {
+            font-size: 0.95rem;
+            margin-bottom: 1rem;
             color: var(--text-primary);
             display: flex;
             align-items: center;
             gap: 0.5rem;
         }
         
+        /* Compact upload area */
         .upload-area {
             border: 2px dashed var(--border);
             border-radius: 8px;
-            padding: 2rem;
+            padding: 1rem;
             text-align: center;
             cursor: pointer;
             transition: all 0.2s;
-            margin-bottom: 1.5rem;
+            margin-bottom: 1.25rem;
         }
         
         .upload-area:hover, .upload-area.dragover {
@@ -554,42 +645,44 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         .upload-icon {
-            font-size: 2.5rem;
-            margin-bottom: 0.75rem;
+            font-size: 1.5rem;
+            margin-bottom: 0.25rem;
         }
         
         .upload-text {
             color: var(--text-secondary);
-            font-size: 0.9rem;
+            font-size: 0.8rem;
         }
         
         .upload-filename {
-            margin-top: 0.75rem;
+            margin-top: 0.5rem;
             color: var(--success);
             font-weight: 500;
+            font-size: 0.85rem;
+            word-break: break-all;
         }
         
         .form-group {
-            margin-bottom: 1.25rem;
+            margin-bottom: 1rem;
         }
         
         .form-group label {
             display: block;
-            font-size: 0.875rem;
+            font-size: 0.8rem;
             font-weight: 500;
-            margin-bottom: 0.5rem;
+            margin-bottom: 0.35rem;
             color: var(--text-secondary);
         }
         
         .form-group select,
         .form-group input[type="number"] {
             width: 100%;
-            padding: 0.625rem 0.875rem;
+            padding: 0.5rem 0.75rem;
             background: var(--bg-tertiary);
             border: 1px solid var(--border);
             border-radius: 6px;
             color: var(--text-primary);
-            font-size: 0.9rem;
+            font-size: 0.85rem;
         }
         
         .form-group select:focus,
@@ -598,10 +691,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             border-color: var(--accent);
         }
         
+        /* Disabled/Coming Soon options */
+        .form-group select option.disabled-option {
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+        
         .checkbox-group {
             display: flex;
-            flex-wrap: wrap;
-            gap: 1rem;
+            flex-direction: column;
+            gap: 0.5rem;
         }
         
         .checkbox-item {
@@ -612,14 +711,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         .checkbox-item input[type="checkbox"] {
-            width: 18px;
-            height: 18px;
+            width: 16px;
+            height: 16px;
             accent-color: var(--accent);
             cursor: pointer;
         }
         
         .checkbox-item span {
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             color: var(--text-secondary);
         }
         
@@ -628,9 +727,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             align-items: center;
             justify-content: center;
             gap: 0.5rem;
-            padding: 0.75rem 1.5rem;
-            border-radius: 8px;
-            font-size: 0.95rem;
+            padding: 0.6rem 1rem;
+            border-radius: 6px;
+            font-size: 0.9rem;
             font-weight: 500;
             cursor: pointer;
             transition: all 0.2s;
@@ -653,18 +752,92 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             cursor: not-allowed;
         }
         
-        /* Results Panel */
-        .results-panel {
+        /* History section */
+        .history-section {
+            margin-top: 1.5rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border);
+        }
+        
+        .history-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .history-item {
             display: flex;
-            flex-direction: column;
-            gap: 1.5rem;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+            font-size: 0.8rem;
+        }
+        
+        .history-item:hover {
+            background: var(--bg-tertiary);
+        }
+        
+        .history-item.active {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--accent);
+        }
+        
+        .history-item .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        
+        .history-item .run-info {
+            flex: 1;
+            overflow: hidden;
+        }
+        
+        .history-item .run-name {
+            font-size: 0.75rem;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .history-item .run-time {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+        }
+        
+        /* Main content area */
+        .main-content {
+            flex: 1;
+            padding: 1.5rem 2rem;
+            overflow-y: auto;
+        }
+        
+        .card {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 1.25rem;
+            border: 1px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+        
+        .card h2 {
+            font-size: 1rem;
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
         }
         
         .status-banner {
             display: flex;
             align-items: center;
             gap: 1rem;
-            padding: 1rem 1.25rem;
+            padding: 0.875rem 1rem;
             border-radius: 8px;
             background: var(--bg-tertiary);
         }
@@ -692,7 +865,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         .status-info .run-id {
             font-family: monospace;
-            font-size: 0.85rem;
+            font-size: 0.8rem;
             color: var(--text-secondary);
         }
         
@@ -728,9 +901,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             border: 1px solid var(--border);
             border-radius: 8px;
             font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
-            font-size: 0.8rem;
+            font-size: 0.75rem;
             line-height: 1.5;
-            max-height: 400px;
+            max-height: 350px;
             overflow-y: auto;
             padding: 1rem;
             white-space: pre-wrap;
@@ -751,7 +924,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             display: flex;
             align-items: center;
             gap: 0.75rem;
-            padding: 0.875rem 1rem;
+            padding: 0.75rem 1rem;
             background: var(--bg-tertiary);
             border-radius: 8px;
             text-decoration: none;
@@ -761,6 +934,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         .output-file:hover {
             background: var(--border);
+        }
+        
+        .output-file.primary {
+            border: 1px solid var(--accent);
+            background: rgba(59, 130, 246, 0.1);
         }
         
         .output-file .file-icon {
@@ -773,10 +951,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         .output-file .file-name {
             font-weight: 500;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
         }
         
-        .output-file .file-size {
+        .output-file .file-desc {
             font-size: 0.75rem;
             color: var(--text-secondary);
         }
@@ -804,168 +982,119 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             border-radius: 8px;
             padding: 1rem;
             color: var(--error);
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             margin-top: 1rem;
             white-space: pre-wrap;
             max-height: 200px;
             overflow-y: auto;
         }
-        
-        /* History */
-        .history-list {
-            max-height: 300px;
-            overflow-y: auto;
-        }
-        
-        .history-item {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            padding: 0.75rem;
-            border-radius: 6px;
-            cursor: pointer;
-            transition: background 0.2s;
-        }
-        
-        .history-item:hover {
-            background: var(--bg-tertiary);
-        }
-        
-        .history-item.active {
-            background: var(--bg-tertiary);
-            border: 1px solid var(--accent);
-        }
-        
-        .history-item .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            flex-shrink: 0;
-        }
-        
-        .history-item .run-info {
-            flex: 1;
-            overflow: hidden;
-        }
-        
-        .history-item .run-name {
-            font-size: 0.85rem;
-            font-weight: 500;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        
-        .history-item .run-time {
-            font-size: 0.75rem;
-            color: var(--text-secondary);
-        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>📄 OCR Pipeline</h1>
-            <p>Upload a PDF to extract text, tables, and signatures</p>
-        </header>
-        
-        <div class="main-grid">
-            <!-- Left Column: Upload & Config -->
-            <div class="left-column">
-                <div class="card">
-                    <h2>⚙️ Configuration</h2>
-                    
-                    <form id="uploadForm">
-                        <div class="upload-area" id="uploadArea">
-                            <input type="file" id="pdfInput" name="pdf" accept=".pdf">
-                            <div class="upload-icon">📁</div>
-                            <div class="upload-text">Drop PDF here or click to browse</div>
-                            <div class="upload-filename" id="fileName"></div>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="provider">Provider</label>
-                            <select id="provider" name="provider">
-                                <option value="azure" selected>Azure Document Intelligence</option>
-                                <option value="vertex">Google Vertex AI</option>
-                            </select>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="dpi">DPI (150-600)</label>
-                            <input type="number" id="dpi" name="dpi" value="300" min="150" max="600" step="50">
-                        </div>
-                        
-                        <div class="form-group">
-                            <label>Options</label>
-                            <div class="checkbox-group">
-                                <label class="checkbox-item">
-                                    <input type="checkbox" id="enhance" name="enhance" checked>
-                                    <span>Enhance Images</span>
-                                </label>
-                                <label class="checkbox-item">
-                                    <input type="checkbox" id="save_artifacts" name="save_artifacts">
-                                    <span>Save Artifacts</span>
-                                </label>
-                                <label class="checkbox-item">
-                                    <input type="checkbox" id="signature_report" name="signature_report" checked>
-                                    <span>Signature Report</span>
-                                </label>
-                            </div>
-                        </div>
-                        
-                        <button type="submit" class="btn btn-primary" id="runBtn" disabled>
-                            <span>▶️</span> Run Pipeline
-                        </button>
-                    </form>
+    <div class="top-header">
+        <div class="logo-section">
+            <img src="/static/ascendion_logo.png" alt="Ascendion">
+            <div>
+                <div class="app-title">OCR Pipeline</div>
+                <div class="app-subtitle">Document Intelligence Extraction</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="main-layout">
+        <!-- Left Sidebar - Pinned -->
+        <div class="sidebar">
+            <h2>⚙️ Configuration</h2>
+            
+            <form id="uploadForm">
+                <div class="upload-area" id="uploadArea">
+                    <input type="file" id="pdfInput" name="pdf" accept=".pdf">
+                    <div class="upload-icon">📄</div>
+                    <div class="upload-text">Drop PDF or click to browse</div>
+                    <div class="upload-filename" id="fileName"></div>
                 </div>
                 
-                <div class="card" style="margin-top: 1.5rem;">
-                    <h2>📜 History</h2>
-                    <div class="history-list" id="historyList">
-                        <div class="empty-state" style="padding: 1.5rem;">
-                            <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📭</div>
-                            <div>No previous runs</div>
-                        </div>
+                <div class="form-group">
+                    <label for="provider">Provider</label>
+                    <select id="provider" name="provider">
+                        <option value="azure" selected>Azure Document Intelligence</option>
+                        <option value="vertex" disabled class="disabled-option">Google Vertex AI (Coming Soon)</option>
+                        <option value="aws" disabled class="disabled-option">AWS Textract (Coming Soon)</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="dpi">DPI (150-600)</label>
+                    <input type="number" id="dpi" name="dpi" value="300" min="150" max="600" step="50">
+                </div>
+                
+                <div class="form-group">
+                    <label>Options</label>
+                    <div class="checkbox-group">
+                        <label class="checkbox-item">
+                            <input type="checkbox" id="enhance" name="enhance" checked>
+                            <span>Enhance Images</span>
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" id="save_artifacts" name="save_artifacts">
+                            <span>Save Artifacts</span>
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" id="signature_report" name="signature_report" checked>
+                            <span>Signature Report</span>
+                        </label>
+                    </div>
+                </div>
+                
+                <button type="submit" class="btn btn-primary" id="runBtn" disabled>
+                    ▶️ Run Pipeline
+                </button>
+            </form>
+            
+            <div class="history-section">
+                <h2>📜 History</h2>
+                <div class="history-list" id="historyList">
+                    <div class="empty-state" style="padding: 1rem; font-size: 0.8rem;">
+                        No previous runs
                     </div>
                 </div>
             </div>
-            
-            <!-- Right Column: Results -->
-            <div class="results-panel" id="resultsPanel">
-                <div class="card">
-                    <div class="empty-state" id="emptyState">
-                        <div class="icon">📋</div>
-                        <div>Upload a PDF and run the pipeline to see results</div>
+        </div>
+        
+        <!-- Main Content -->
+        <div class="main-content">
+            <div class="card">
+                <div class="empty-state" id="emptyState">
+                    <div class="icon">📋</div>
+                    <div>Upload a PDF and run the pipeline to see results</div>
+                </div>
+                
+                <div id="activeRun" style="display: none;">
+                    <div class="status-banner">
+                        <div class="status-indicator" id="statusIndicator"></div>
+                        <div class="status-info">
+                            <div class="run-id" id="runIdDisplay"></div>
+                            <div class="status-text" id="statusText">Queued</div>
+                        </div>
+                        <div class="elapsed-time" id="elapsedTime"></div>
                     </div>
                     
-                    <div id="activeRun" style="display: none;">
-                        <div class="status-banner">
-                            <div class="status-indicator" id="statusIndicator"></div>
-                            <div class="status-info">
-                                <div class="run-id" id="runIdDisplay"></div>
-                                <div class="status-text" id="statusText">Queued</div>
-                            </div>
-                            <div class="elapsed-time" id="elapsedTime"></div>
-                        </div>
-                        
-                        <div class="progress-bar">
-                            <div class="progress-bar-fill" id="progressBar" style="width: 0%"></div>
-                        </div>
-                        
-                        <div class="error-message" id="errorMessage" style="display: none;"></div>
+                    <div class="progress-bar">
+                        <div class="progress-bar-fill" id="progressBar" style="width: 0%"></div>
                     </div>
+                    
+                    <div class="error-message" id="errorMessage" style="display: none;"></div>
                 </div>
-                
-                <div class="card" id="logCard" style="display: none;">
-                    <h2>📝 Log Output</h2>
-                    <div class="log-output" id="logOutput"></div>
-                </div>
-                
-                <div class="card" id="outputsCard" style="display: none;">
-                    <h2>📦 Output Files</h2>
-                    <div class="output-files" id="outputFiles"></div>
-                </div>
+            </div>
+            
+            <div class="card" id="logCard" style="display: none;">
+                <h2>📝 Log Output</h2>
+                <div class="log-output" id="logOutput"></div>
+            </div>
+            
+            <div class="card" id="outputsCard" style="display: none;">
+                <h2>📦 Output Files</h2>
+                <div class="output-files" id="outputFiles"></div>
             </div>
         </div>
     </div>
@@ -1044,7 +1173,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             formData.append('signature_report', document.getElementById('signature_report').checked);
             
             runBtn.disabled = true;
-            runBtn.innerHTML = '<span>⏳</span> Starting...';
+            runBtn.innerHTML = '⏳ Starting...';
             
             try {
                 const response = await fetch('/run', {
@@ -1066,7 +1195,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 alert('Error starting pipeline: ' + error.message);
             } finally {
                 runBtn.disabled = false;
-                runBtn.innerHTML = '<span>▶️</span> Run Pipeline';
+                runBtn.innerHTML = '▶️ Run Pipeline';
             }
         });
         
@@ -1155,15 +1284,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 
                 if (data.files && data.files.length > 0) {
                     outputsCard.style.display = 'block';
-                    outputFiles.innerHTML = data.files.map(file => {
-                        const icon = getFileIcon(file.type);
-                        const size = formatSize(file.size);
+                    outputFiles.innerHTML = data.files.map((file, idx) => {
+                        const icon = getFileIcon(file.type, file.category);
+                        const desc = getFileDescription(file);
+                        const isPrimary = file.category === 'document' || file.category === 'signature';
                         return `
-                            <a href="${file.view_url}" target="_blank" class="output-file">
+                            <a href="${file.view_url}" target="_blank" class="output-file ${isPrimary ? 'primary' : ''}">
                                 <span class="file-icon">${icon}</span>
                                 <div class="file-info">
                                     <div class="file-name">${file.name}</div>
-                                    <div class="file-size">${size}</div>
+                                    <div class="file-desc">${desc}</div>
                                 </div>
                                 <span class="file-action">View →</span>
                             </a>
@@ -1175,15 +1305,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
         
-        function getFileIcon(type) {
+        function getFileIcon(type, category) {
+            if (category === 'document') return '📄';
+            if (category === 'signature') return '✍️';
             const icons = {
-                markdown: '📄',
+                markdown: '📝',
                 json: '📋',
-                log: '📝',
+                log: '📜',
                 image: '🖼️',
                 file: '📎'
             };
             return icons[type] || '📎';
+        }
+        
+        function getFileDescription(file) {
+            if (file.category === 'document') return 'Extracted document with tables';
+            if (file.category === 'signature') return 'Signature analysis report';
+            if (file.type === 'json') return 'Structured data';
+            if (file.type === 'log') return 'Processing log';
+            if (file.type === 'image') return 'Signature image';
+            return formatSize(file.size);
         }
         
         function formatSize(bytes) {
@@ -1220,6 +1361,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         function selectRun(runId) {
             currentRunId = runId;
             showRunStatus(runId, 'loading');
+            outputsCard.style.display = 'none';
             
             // Stop any existing polling
             if (pollInterval) {
@@ -1250,6 +1392,435 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         // Initial load
         loadHistory();
     </script>
+</body>
+</html>
+"""
+
+# Document template - for extracted markdown with proper table formatting
+DOCUMENT_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{title}}</title>
+    <style>
+        :root {
+            --bg: #ffffff;
+            --text: #1a1a1a;
+            --text-secondary: #666666;
+            --border: #e0e0e0;
+            --header-bg: #f8f9fa;
+            --accent: #2563eb;
+        }
+        
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #1a1a2e;
+                --text: #e8e8e8;
+                --text-secondary: #a0a0a0;
+                --border: #3a3a4a;
+                --header-bg: #252538;
+                --accent: #60a5fa;
+            }
+        }
+        
+        * {
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Georgia', 'Times New Roman', serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.8;
+            font-size: 16px;
+        }
+        
+        /* Header bar with download */
+        .doc-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem;
+            margin-bottom: 2rem;
+            background: var(--header-bg);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+        
+        .doc-title {
+            font-size: 1rem;
+            color: var(--text-secondary);
+        }
+        
+        .download-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--accent);
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+        
+        .download-btn:hover {
+            opacity: 0.9;
+        }
+        
+        /* Document content styling */
+        h1, h2, h3, h4, h5, h6 {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            color: var(--text);
+            margin-top: 2rem;
+            margin-bottom: 1rem;
+            line-height: 1.3;
+        }
+        
+        h1 {
+            font-size: 1.75rem;
+            border-bottom: 2px solid var(--border);
+            padding-bottom: 0.5rem;
+        }
+        
+        h2 {
+            font-size: 1.4rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0.3rem;
+        }
+        
+        h3 { font-size: 1.2rem; }
+        h4 { font-size: 1.1rem; }
+        
+        p {
+            margin-bottom: 1rem;
+            text-align: justify;
+        }
+        
+        /* Table styling - document-like appearance */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.9rem;
+        }
+        
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.75rem 1rem;
+            text-align: left;
+            vertical-align: top;
+        }
+        
+        th {
+            background: var(--header-bg);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.8rem;
+            letter-spacing: 0.5px;
+        }
+        
+        tr:nth-child(even) {
+            background: rgba(0, 0, 0, 0.02);
+        }
+        
+        @media (prefers-color-scheme: dark) {
+            tr:nth-child(even) {
+                background: rgba(255, 255, 255, 0.02);
+            }
+        }
+        
+        /* Numeric cells - right align */
+        td:last-child {
+            text-align: right;
+        }
+        
+        /* Code blocks */
+        code {
+            background: var(--header-bg);
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.9em;
+        }
+        
+        pre {
+            background: var(--header-bg);
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+        }
+        
+        pre code {
+            padding: 0;
+            background: none;
+        }
+        
+        /* Lists */
+        ul, ol {
+            margin-bottom: 1rem;
+            padding-left: 2rem;
+        }
+        
+        li {
+            margin-bottom: 0.5rem;
+        }
+        
+        /* Blockquotes */
+        blockquote {
+            border-left: 4px solid var(--accent);
+            margin: 1.5rem 0;
+            padding: 0.5rem 1rem;
+            background: var(--header-bg);
+            font-style: italic;
+        }
+        
+        /* Images */
+        img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 4px;
+            margin: 1rem 0;
+        }
+        
+        /* Horizontal rule */
+        hr {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 2rem 0;
+        }
+        
+        /* Print styles */
+        @media print {
+            body {
+                max-width: none;
+                padding: 0;
+            }
+            .doc-header {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="doc-header">
+        <div class="doc-title">📄 {{title}}</div>
+        {{download_link}}
+    </div>
+    <div class="doc-content">
+        {{content}}
+    </div>
+</body>
+</html>
+"""
+
+# Signature report template - with embedded images
+SIGNATURE_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{title}}</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --bg-card: #1e293b;
+            --text: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --border: #334155;
+            --accent: #3b82f6;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --error: #ef4444;
+        }
+        
+        * {
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 2rem;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+        }
+        
+        /* Header */
+        .report-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem 1.5rem;
+            margin-bottom: 2rem;
+            background: var(--bg-card);
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+        
+        .report-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+        
+        .download-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--accent);
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 0.85rem;
+        }
+        
+        .download-btn:hover {
+            opacity: 0.9;
+        }
+        
+        /* Content styling */
+        h1, h2, h3, h4 {
+            color: var(--text);
+            margin-top: 2rem;
+            margin-bottom: 1rem;
+        }
+        
+        h1 {
+            font-size: 1.5rem;
+            border-bottom: 2px solid var(--accent);
+            padding-bottom: 0.5rem;
+        }
+        
+        h2 {
+            font-size: 1.25rem;
+            color: var(--accent);
+        }
+        
+        h3 {
+            font-size: 1.1rem;
+        }
+        
+        p {
+            margin-bottom: 1rem;
+            color: var(--text-secondary);
+        }
+        
+        strong {
+            color: var(--text);
+        }
+        
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+            background: var(--bg-card);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.75rem 1rem;
+            text-align: left;
+        }
+        
+        th {
+            background: rgba(59, 130, 246, 0.2);
+            font-weight: 600;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        tr:nth-child(even) {
+            background: rgba(255, 255, 255, 0.02);
+        }
+        
+        /* Signature images */
+        img {
+            max-width: 200px;
+            height: auto;
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            padding: 0.5rem;
+            background: white;
+            margin: 0.5rem 0;
+        }
+        
+        /* Lists */
+        ul, ol {
+            margin-bottom: 1rem;
+            padding-left: 1.5rem;
+            color: var(--text-secondary);
+        }
+        
+        li {
+            margin-bottom: 0.5rem;
+        }
+        
+        /* Code */
+        code {
+            background: var(--bg);
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.9em;
+            color: var(--accent);
+        }
+        
+        pre {
+            background: var(--bg);
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+        }
+        
+        pre code {
+            padding: 0;
+            background: none;
+        }
+        
+        /* Blockquotes */
+        blockquote {
+            border-left: 4px solid var(--accent);
+            margin: 1.5rem 0;
+            padding: 0.5rem 1rem;
+            background: var(--bg-card);
+            color: var(--text-secondary);
+        }
+        
+        hr {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 2rem 0;
+        }
+        
+        /* Status badges in content */
+        .status-consistent { color: var(--success); }
+        .status-discrepancy { color: var(--error); }
+        .status-warning { color: var(--warning); }
+    </style>
+</head>
+<body>
+    <div class="report-header">
+        <div class="report-title">✍️ Signature Analysis Report</div>
+        {{download_link}}
+    </div>
+    <div class="report-content">
+        {{content}}
+    </div>
 </body>
 </html>
 """
@@ -1305,9 +1876,22 @@ MARKDOWN_TEMPLATE = """<!DOCTYPE html>
             color: #94a3b8;
         }
         img { max-width: 100%; height: auto; border-radius: 8px; }
+        .download-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: #3b82f6;
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            margin-bottom: 1.5rem;
+        }
     </style>
 </head>
 <body>
+{{download_link}}
 {{content}}
 </body>
 </html>
