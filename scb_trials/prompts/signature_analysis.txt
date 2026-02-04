@@ -1,0 +1,13 @@
+Analyze this signature block. Extract the following information:
+
+1. **Name**: The printed name associated with the signature (look for text near/below the signature)
+2. **Designation**: The job title or role (e.g., "Managing Director", "CFO", "Authorized Signatory")
+3. **Date**: Any date visible near the signature
+4. **Visual Description**: Brief description of the signature's visual characteristics for comparison purposes (e.g., "cursive with prominent loop at start", "initials JD with underline", "flowing script with flourish")
+
+Return ONLY valid JSON with keys: name, designation, date, visual_description
+
+If any field is not visible or cannot be determined, use null for that field.
+
+Example output:
+{"name": "John Smith", "designation": "Managing Director", "date": "15/01/2026", "visual_description": "cursive signature with prominent J loop"}

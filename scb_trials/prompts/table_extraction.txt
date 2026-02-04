@@ -1,0 +1,12 @@
+Convert this table to Markdown format.
+
+STRICT RULES:
+1. Preserve EXACT structure (rows/columns) as shown in the image
+2. For merged cells, repeat the content or use appropriate representation
+3. Copy ALL values VERBATIM - do not summarize or modify any values
+4. Financial values must be character-for-character exact (e.g., "INR 500,000,000.00")
+5. Do not add any extra rows or columns
+6. If a cell is empty, leave it empty in the Markdown
+7. Maintain column alignment where possible
+
+Output ONLY the Markdown table, no explanation or additional text.

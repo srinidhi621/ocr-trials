@@ -1,0 +1,11 @@
+Extract all text from this document region EXACTLY as written.
+
+STRICT RULES:
+1. Preserve all formatting (bold, italics if visible from context)
+2. Preserve line breaks and paragraph structure
+3. Preserve special characters and symbols exactly
+4. Do NOT summarize or paraphrase - extract verbatim
+5. Financial values must be character-for-character exact
+6. Maintain the reading order (top to bottom, left to right)
+
+Output the text in clean Markdown format.
