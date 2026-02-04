@@ -520,6 +520,29 @@ def list_runs():
     })
 
 
+@app.route("/how-it-works")
+def how_it_works():
+    """Serve the HOW_IT_WORKS.md content as HTML."""
+    how_it_works_path = Path(__file__).parent / "HOW_IT_WORKS.md"
+    
+    if not how_it_works_path.exists():
+        return jsonify({"error": "Documentation not found"}), 404
+    
+    try:
+        with open(how_it_works_path, "r", encoding="utf-8") as f:
+            md_content = f.read()
+        
+        # Convert markdown to HTML
+        html_content = markdown.markdown(
+            md_content,
+            extensions=["tables", "fenced_code", "codehilite", "toc"]
+        )
+        
+        return jsonify({"html": html_content})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ============================================================================
 # HTML Templates
 # ============================================================================
@@ -879,6 +902,216 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: var(--text-secondary);
         }
         
+        /* How it works button */
+        .how-it-works-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.4rem 0.75rem;
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-left: 1rem;
+        }
+        
+        .how-it-works-btn:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border-color: var(--accent);
+        }
+        
+        /* Modal Overlay */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s, visibility 0.3s;
+        }
+        
+        .modal-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+        
+        .modal-content {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            width: 90%;
+            max-width: 900px;
+            max-height: 85vh;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid var(--border);
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            transform: translateY(20px);
+            transition: transform 0.3s;
+        }
+        
+        .modal-overlay.active .modal-content {
+            transform: translateY(0);
+        }
+        
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        
+        .modal-header h2 {
+            font-size: 1.1rem;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin: 0;
+        }
+        
+        .modal-close {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 0.25rem;
+            line-height: 1;
+            transition: color 0.2s;
+        }
+        
+        .modal-close:hover {
+            color: var(--text-primary);
+        }
+        
+        .modal-body {
+            padding: 1.5rem;
+            overflow-y: auto;
+            flex: 1;
+        }
+        
+        /* Modal content styling */
+        .modal-body h1, .modal-body h2, .modal-body h3 {
+            color: var(--text-primary);
+            margin-top: 1.5rem;
+            margin-bottom: 0.75rem;
+        }
+        
+        .modal-body h1:first-child {
+            margin-top: 0;
+        }
+        
+        .modal-body h1 {
+            font-size: 1.5rem;
+            border-bottom: 2px solid var(--accent);
+            padding-bottom: 0.5rem;
+        }
+        
+        .modal-body h2 {
+            font-size: 1.2rem;
+            color: var(--accent);
+        }
+        
+        .modal-body h3 {
+            font-size: 1rem;
+        }
+        
+        .modal-body p {
+            color: var(--text-secondary);
+            margin-bottom: 1rem;
+            line-height: 1.7;
+        }
+        
+        .modal-body ul, .modal-body ol {
+            color: var(--text-secondary);
+            padding-left: 1.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .modal-body li {
+            margin-bottom: 0.5rem;
+        }
+        
+        .modal-body strong {
+            color: var(--text-primary);
+        }
+        
+        .modal-body code {
+            background: var(--bg-primary);
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85em;
+            color: var(--accent);
+        }
+        
+        .modal-body pre {
+            background: var(--bg-primary);
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid var(--border);
+            margin: 1rem 0;
+        }
+        
+        .modal-body pre code {
+            padding: 0;
+            background: none;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            line-height: 1.5;
+        }
+        
+        .modal-body table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.85rem;
+        }
+        
+        .modal-body th, .modal-body td {
+            border: 1px solid var(--border);
+            padding: 0.6rem 0.8rem;
+            text-align: left;
+        }
+        
+        .modal-body th {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+        
+        .modal-body tr:nth-child(even) {
+            background: rgba(255, 255, 255, 0.02);
+        }
+        
+        .modal-body hr {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 1.5rem 0;
+        }
+        
+        .modal-body blockquote {
+            border-left: 4px solid var(--accent);
+            margin: 1rem 0;
+            padding: 0.5rem 1rem;
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+        }
+        
         .progress-bar {
             height: 6px;
             background: var(--bg-tertiary);
@@ -1067,6 +1300,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="empty-state" id="emptyState">
                     <div class="icon">📋</div>
                     <div>Upload a PDF and run the pipeline to see results</div>
+                    <button class="how-it-works-btn" onclick="openHowItWorks()" style="margin-top: 1rem;">
+                        ℹ️ How it works
+                    </button>
                 </div>
                 
                 <div id="activeRun" style="display: none;">
@@ -1077,6 +1313,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                             <div class="status-text" id="statusText">Queued</div>
                         </div>
                         <div class="elapsed-time" id="elapsedTime"></div>
+                        <button class="how-it-works-btn" onclick="openHowItWorks()">
+                            ℹ️ How it works
+                        </button>
                     </div>
                     
                     <div class="progress-bar">
@@ -1095,6 +1334,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="card" id="outputsCard" style="display: none;">
                 <h2>📦 Output Files</h2>
                 <div class="output-files" id="outputFiles"></div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- How it works Modal -->
+    <div class="modal-overlay" id="howItWorksModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>📖 How it works</h2>
+                <button class="modal-close" onclick="closeHowItWorks()">×</button>
+            </div>
+            <div class="modal-body" id="howItWorksContent">
+                Loading...
             </div>
         </div>
     </div>
@@ -1391,6 +1643,46 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         // Initial load
         loadHistory();
+        
+        // How it works modal
+        const howItWorksModal = document.getElementById('howItWorksModal');
+        const howItWorksContent = document.getElementById('howItWorksContent');
+        let howItWorksLoaded = false;
+        
+        async function openHowItWorks() {
+            howItWorksModal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+            
+            if (!howItWorksLoaded) {
+                try {
+                    const response = await fetch('/how-it-works');
+                    const data = await response.json();
+                    howItWorksContent.innerHTML = data.html;
+                    howItWorksLoaded = true;
+                } catch (error) {
+                    howItWorksContent.innerHTML = '<p>Failed to load content. Please try again.</p>';
+                }
+            }
+        }
+        
+        function closeHowItWorks() {
+            howItWorksModal.classList.remove('active');
+            document.body.style.overflow = '';
+        }
+        
+        // Close modal on overlay click
+        howItWorksModal.addEventListener('click', (e) => {
+            if (e.target === howItWorksModal) {
+                closeHowItWorks();
+            }
+        });
+        
+        // Close modal on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && howItWorksModal.classList.contains('active')) {
+                closeHowItWorks();
+            }
+        });
     </script>
 </body>
 </html>
