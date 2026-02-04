@@ -104,13 +104,21 @@ HTML_PAGE = """
         });
       }
 
+      function setLogText(text) {
+        const isAtBottom = Math.abs(logEl.scrollHeight - logEl.clientHeight - logEl.scrollTop) < 8;
+        logEl.textContent = text;
+        if (isAtBottom) {
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+      }
+
       async function pollStatus() {
         if (!currentRunId) return;
         const res = await fetch(`/status/${currentRunId}`);
         const data = await res.json();
         statusEl.textContent = data.status;
         outputDirEl.textContent = data.output_dir || '-';
-        logEl.textContent = data.log || 'No logs yet.';
+        setLogText(data.log || 'No logs yet.');
         if (data.status === 'completed' || data.status === 'failed') {
           clearInterval(pollHandle);
           pollHandle = null;
@@ -126,7 +134,7 @@ HTML_PAGE = """
         e.preventDefault();
         const formData = new FormData(form);
         statusEl.textContent = 'starting';
-        logEl.textContent = 'Starting run...';
+        setLogText('Starting run...');
         outputLinksEl.innerHTML = '';
 
         const res = await fetch('/run', { method: 'POST', body: formData });

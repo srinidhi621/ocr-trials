@@ -12,7 +12,7 @@
 
 ## Workstreams
 
-### 1) Signature Detection & Consistency (Top Priority)
+### 1) Signature Detection & Consistency (Top Priority) [DONE]
 - Goal: near‑zero missed signatures and reliable consistency checks.
 - Detection upgrades:
   - Dedicated signature scan pass that combines DI + CV + LLM validation.
@@ -27,7 +27,7 @@
   - “Signature coverage” per page (candidates vs. confirmed).
   - “Signer stability” score per signer group.
 
-### 2) Local UI (Lightweight)
+### 2) Local UI (Lightweight) [DONE]
 - Single‑page local UI (no cloud hosting).
 - Upload PDF, start pipeline, stream logs/progress.
 - Show run ID and link to full output folder.
