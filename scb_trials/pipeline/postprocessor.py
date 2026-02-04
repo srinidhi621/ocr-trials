@@ -92,19 +92,19 @@ class SignatureComparator:
     Compares signatures to detect consistency or discrepancies.
     
     Uses a multi-metric approach:
-    - SSIM (Structural Similarity Index) - 40% weight
-    - ORB feature matching - 35% weight
-    - Perceptual hash - 25% weight
+    - SSIM (Structural Similarity Index) - 30% weight (reduced - sensitive to artifacts)
+    - ORB feature matching - 30% weight (reduced - signatures have few corner features)
+    - Perceptual hash - 40% weight (increased - better for overall shape)
     """
     
-    # Similarity thresholds
-    MATCH_THRESHOLD = 0.7
-    POSSIBLE_MATCH_THRESHOLD = 0.5
+    # Similarity thresholds (relaxed for real-world signature variations)
+    MATCH_THRESHOLD = 0.50           # Lowered from 0.7
+    POSSIBLE_MATCH_THRESHOLD = 0.35  # Lowered from 0.5
     
-    # Weighting for combined score
-    SSIM_WEIGHT = 0.40
-    ORB_WEIGHT = 0.35
-    HASH_WEIGHT = 0.25
+    # Weighting for combined score (adjusted for signature characteristics)
+    SSIM_WEIGHT = 0.30   # Reduced from 0.40
+    ORB_WEIGHT = 0.30    # Reduced from 0.35
+    HASH_WEIGHT = 0.40   # Increased from 0.25
     
     def __init__(
         self,
@@ -257,6 +257,46 @@ class SignatureComparator:
             notes=notes
         )
     
+    def _preprocess_signature(self, img: np.ndarray) -> np.ndarray:
+        """
+        Preprocess signature image for better comparison.
+        
+        Steps:
+        1. Convert to grayscale
+        2. Apply adaptive thresholding to binarize (reduces background noise)
+        3. Apply morphological operations to clean up
+        
+        Args:
+            img: Input signature image
+            
+        Returns:
+            Preprocessed grayscale image
+        """
+        import cv2
+        
+        # Convert to grayscale if needed
+        if len(img.shape) == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img.copy()
+        
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        
+        # Apply adaptive thresholding to handle varying backgrounds
+        # This helps normalize signatures from different pages
+        binary = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 11, 2
+        )
+        
+        # Apply morphological closing to connect nearby strokes
+        kernel = np.ones((2, 2), np.uint8)
+        cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        
+        # Invert back to white background with black signature
+        return cv2.bitwise_not(cleaned)
+    
     def _compute_detailed_similarity(
         self,
         img1: np.ndarray,
@@ -284,16 +324,9 @@ class SignatureComparator:
         img1_resized = cv2.resize(img1, target_size)
         img2_resized = cv2.resize(img2, target_size)
         
-        # Convert to grayscale
-        if len(img1_resized.shape) == 3:
-            gray1 = cv2.cvtColor(img1_resized, cv2.COLOR_BGR2GRAY)
-        else:
-            gray1 = img1_resized
-            
-        if len(img2_resized.shape) == 3:
-            gray2 = cv2.cvtColor(img2_resized, cv2.COLOR_BGR2GRAY)
-        else:
-            gray2 = img2_resized
+        # Preprocess signatures to normalize backgrounds and reduce noise
+        gray1 = self._preprocess_signature(img1_resized)
+        gray2 = self._preprocess_signature(img2_resized)
         
         # 1. Compute SSIM
         ssim_score = self._compute_ssim(gray1, gray2)
@@ -304,7 +337,8 @@ class SignatureComparator:
         # 3. Compute perceptual hash distance
         hash_distance = self._compute_hash_distance(gray1, gray2)
         # Convert hash distance to similarity (0-1 scale, max distance ~64 for 64-bit hash)
-        hash_similarity = max(0, 1 - (hash_distance / 32))
+        # Use 48 as divisor (increased from 32) to be more tolerant of variations
+        hash_similarity = max(0, 1 - (hash_distance / 48))
         
         # Compute weighted score
         weighted_score = (
@@ -388,15 +422,19 @@ class SignatureComparator:
                 return 0.0
             
             # Sort by distance and use good matches
+            # Increased distance threshold from 50 to 80 for signature variations
             matches = sorted(matches, key=lambda x: x.distance)
-            good_matches = [m for m in matches if m.distance < 50]
+            good_matches = [m for m in matches if m.distance < 80]
             
             max_possible = min(len(kp1), len(kp2))
             if max_possible == 0:
                 return 0.5
             
+            # Use a more forgiving similarity calculation
             similarity = len(good_matches) / max_possible
-            return min(1.0, similarity)
+            # Boost the score slightly since signatures have fewer features
+            similarity = min(1.0, similarity * 1.3)
+            return similarity
             
         except Exception:
             return 0.5

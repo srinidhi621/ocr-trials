@@ -235,14 +235,17 @@ class SignatureAnalyzer:
     - Creating analysis summary
     """
     
-    # Similarity thresholds for verdict
-    MATCH_THRESHOLD = 0.7
-    POSSIBLE_MATCH_THRESHOLD = 0.5
+    # Similarity thresholds for verdict (relaxed for real-world signature variations)
+    # Signatures often score lower due to scanning artifacts, positioning, background differences
+    MATCH_THRESHOLD = 0.50          # Lowered from 0.7 - signatures rarely score above 0.6
+    POSSIBLE_MATCH_THRESHOLD = 0.35  # Lowered from 0.5 - allow more tolerance
     
-    # Weighting for combined score
-    SSIM_WEIGHT = 0.40
-    ORB_WEIGHT = 0.35
-    HASH_WEIGHT = 0.25
+    # Weighting for combined score (adjusted for signature characteristics)
+    # Reduced SSIM weight as it's most sensitive to scanning artifacts
+    # Increased hash weight as perceptual hash is more robust for signatures
+    SSIM_WEIGHT = 0.30   # Reduced from 0.40 - less sensitive to position/background
+    ORB_WEIGHT = 0.30    # Reduced from 0.35 - signatures have few corner features
+    HASH_WEIGHT = 0.40   # Increased from 0.25 - better for overall shape matching
     
     def __init__(self):
         """Initialize the analyzer."""
@@ -417,8 +420,10 @@ class SignatureAnalyzer:
         group_avg = np.mean(all_avgs)
         std = np.std(all_avgs)
         
-        # Threshold: below group_avg - 1.5 * std, but at least 0.4
-        threshold = max(0.4, group_avg - 1.5 * std)
+        # Threshold: below group_avg - 2.0 * std, but at least 0.25
+        # Relaxed from (0.4, 1.5*std) to allow more normal variation
+        # Real signatures often have legitimate variations that shouldn't be flagged
+        threshold = max(0.25, group_avg - 2.0 * std)
         
         # Find outliers
         outliers = []
@@ -433,6 +438,46 @@ class SignatureAnalyzer:
                 ))
         
         return outliers
+    
+    def _preprocess_signature(self, img: np.ndarray) -> np.ndarray:
+        """
+        Preprocess signature image for better comparison.
+        
+        Steps:
+        1. Convert to grayscale
+        2. Apply adaptive thresholding to binarize (reduces background noise)
+        3. Apply morphological operations to clean up
+        
+        Args:
+            img: Input signature image
+            
+        Returns:
+            Preprocessed grayscale image
+        """
+        import cv2
+        
+        # Convert to grayscale if needed
+        if len(img.shape) == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img.copy()
+        
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        
+        # Apply adaptive thresholding to handle varying backgrounds
+        # This helps normalize signatures from different pages
+        binary = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 11, 2
+        )
+        
+        # Apply morphological closing to connect nearby strokes
+        kernel = np.ones((2, 2), np.uint8)
+        cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        
+        # Invert back to white background with black signature
+        return cv2.bitwise_not(cleaned)
     
     def _compare_signatures(
         self,
@@ -461,7 +506,9 @@ class SignatureAnalyzer:
         
         # Convert hash distance to similarity (0-1 scale)
         # Max hash distance for 64-bit hash is 64
-        hash_similarity = max(0, 1 - (hash_distance / 32))
+        # Use 48 as divisor (increased from 32) to be more tolerant of variations
+        # This means hash distances up to 48 still produce positive similarity
+        hash_similarity = max(0, 1 - (hash_distance / 48))
         
         # Compute weighted score
         weighted_score = (
@@ -504,28 +551,17 @@ class SignatureAnalyzer:
         try:
             from skimage.metrics import structural_similarity as ssim
             
-            # Convert to grayscale if needed
-            if len(img1.shape) == 3:
-                gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-            else:
-                gray1 = img1
-                
-            if len(img2.shape) == 3:
-                gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-            else:
-                gray2 = img2
+            # Resize to same dimensions first
+            target_size = (200, 100)
+            img1_resized = cv2.resize(img1, target_size)
+            img2_resized = cv2.resize(img2, target_size)
             
-            # Resize to same dimensions
-            h1, w1 = gray1.shape
-            h2, w2 = gray2.shape
-            target_h = max(h1, h2)
-            target_w = max(w1, w2)
-            
-            gray1_resized = cv2.resize(gray1, (target_w, target_h))
-            gray2_resized = cv2.resize(gray2, (target_w, target_h))
+            # Preprocess to normalize backgrounds
+            gray1 = self._preprocess_signature(img1_resized)
+            gray2 = self._preprocess_signature(img2_resized)
             
             # Compute SSIM
-            score = ssim(gray1_resized, gray2_resized)
+            score = ssim(gray1, gray2)
             return max(0, min(1, score))
             
         except Exception:
@@ -545,16 +581,14 @@ class SignatureAnalyzer:
         import cv2
         
         try:
-            # Convert to grayscale
-            if len(img1.shape) == 3:
-                gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-            else:
-                gray1 = img1
-                
-            if len(img2.shape) == 3:
-                gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-            else:
-                gray2 = img2
+            # Resize to same dimensions
+            target_size = (200, 100)
+            img1_resized = cv2.resize(img1, target_size)
+            img2_resized = cv2.resize(img2, target_size)
+            
+            # Preprocess to normalize backgrounds
+            gray1 = self._preprocess_signature(img1_resized)
+            gray2 = self._preprocess_signature(img2_resized)
             
             # Initialize ORB detector
             orb = cv2.ORB_create(nfeatures=500)
@@ -573,15 +607,20 @@ class SignatureAnalyzer:
             # Sort by distance
             matches = sorted(matches, key=lambda x: x.distance)
             
-            # Use ratio of good matches
-            good_matches = [m for m in matches if m.distance < 50]
+            # Use ratio of good matches with relaxed distance threshold
+            # Increased from 50 to 80 - signatures have more variation than typical images
+            good_matches = [m for m in matches if m.distance < 80]
             max_possible = min(len(kp1), len(kp2))
             
             if max_possible == 0:
                 return 0.5
             
+            # Use a more forgiving similarity calculation
+            # Consider partial matches as meaningful for signatures
             similarity = len(good_matches) / max_possible
-            return min(1.0, similarity)
+            # Boost the score slightly since signatures inherently have fewer matches
+            similarity = min(1.0, similarity * 1.3)
+            return similarity
             
         except Exception:
             return 0.5
@@ -616,14 +655,11 @@ class SignatureAnalyzer:
         """
         import cv2
         
-        # Convert to grayscale
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image
+        # Preprocess image first for better consistency
+        processed = self._preprocess_signature(image)
         
         # Resize to hash_size + 1 for gradient computation
-        resized = cv2.resize(gray, (hash_size + 1, hash_size))
+        resized = cv2.resize(processed, (hash_size + 1, hash_size))
         
         # Compute horizontal gradient
         diff = resized[:, 1:] > resized[:, :-1]
