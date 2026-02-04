@@ -19,4 +19,6 @@ fi
 
 # Best-effort cleanup for any lingering UI processes
 pkill -f "/scb_trials/app.py" >/dev/null 2>&1 || true
+pkill -f "PORT=5001 python app.py" >/dev/null 2>&1 || true
+pkill -f "python app.py" >/dev/null 2>&1 || true
 echo "UI shutdown complete."

@@ -87,6 +87,24 @@ class SignatureSnippet:
 
 
 @dataclass
+class SignatureOutlier:
+    """Represents a signature that differs from others in its group."""
+    signature_id: str
+    page: int
+    avg_similarity: float
+    reason: str
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "signature_id": self.signature_id,
+            "page": self.page,
+            "avg_similarity": round(self.avg_similarity, 2),
+            "reason": self.reason
+        }
+
+
+@dataclass
 class SignatureGroup:
     """Signatures grouped by person/role."""
     identifier: str             # Name or designation used for grouping
@@ -94,6 +112,7 @@ class SignatureGroup:
     signatures: List[SignatureSnippet] = field(default_factory=list)
     internal_consistency: str = "Unknown"  # "Consistent", "Inconsistent", "Unknown"
     average_similarity: float = 0.0
+    outliers: List[SignatureOutlier] = field(default_factory=list)  # Signatures that differ from the group
     
     @property
     def signature_ids(self) -> List[str]:
@@ -105,8 +124,16 @@ class SignatureGroup:
         """Get list of pages where signatures appear."""
         return sorted(set(sig.page_number for sig in self.signatures))
     
-    def to_dict(self, include_images: bool = False) -> Dict[str, Any]:
+    def to_dict(self, include_images: bool = False, compact: bool = False) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
+        if compact:
+            return {
+                "role": self.designation or self.identifier,
+                "count": len(self.signatures),
+                "pages": self.pages,
+                "consistency_score": round(self.average_similarity, 2) if self.average_similarity > 0 else None,
+                "discrepancies": [o.to_dict() for o in self.outliers]
+            }
         return {
             "identifier": self.identifier,
             "designation": self.designation,
@@ -114,7 +141,8 @@ class SignatureGroup:
             "pages": self.pages,
             "count": len(self.signatures),
             "internal_consistency": self.internal_consistency,
-            "average_similarity": round(self.average_similarity, 3) if self.average_similarity > 0 else None
+            "average_similarity": round(self.average_similarity, 3) if self.average_similarity > 0 else None,
+            "outliers": [o.to_dict() for o in self.outliers]
         }
 
 
@@ -157,8 +185,30 @@ class SignatureAnalysisReport:
     comparison_matrix: Dict[str, Dict[str, float]] = field(default_factory=dict)
     summary: Dict[str, str] = field(default_factory=dict)
     
-    def to_dict(self, include_images: bool = True) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+    def to_dict(self, include_images: bool = True, compact: bool = False) -> Dict[str, Any]:
+        """
+        Convert to dictionary for JSON serialization.
+        
+        Args:
+            include_images: Include base64 images in output (ignored in compact mode)
+            compact: If True, return simplified summary-only format
+            
+        Returns:
+            Dictionary representation of the report
+        """
+        if compact:
+            # Compact mode: simplified summary with just counts, pages, consistency, discrepancies
+            return {
+                "report_metadata": {
+                    "source_file": self.source_file,
+                    "extraction_date": self.extraction_date,
+                    "total_signatures": self.total_signatures,
+                    "unique_signers": self.unique_signers
+                },
+                "signature_summary": [grp.to_dict(compact=True) for grp in self.signature_groups]
+            }
+        
+        # Full mode: include all details
         return {
             "report_metadata": {
                 "source_file": self.source_file,
@@ -262,6 +312,9 @@ class SignatureAnalyzer:
                         group.internal_consistency = "Possibly Consistent"
                     else:
                         group.internal_consistency = "Inconsistent"
+                
+                # Detect outliers using cluster-based analysis
+                group.outliers = self._detect_outliers(group, group_comparisons)
                         
                 # Build comparison matrix
                 for comp in group_comparisons:
@@ -315,6 +368,71 @@ class SignatureAnalyzer:
                 comparisons.append(comparison)
         
         return comparisons
+    
+    def _detect_outliers(
+        self,
+        group: SignatureGroup,
+        comparisons: List[SignaturePairComparison]
+    ) -> List[SignatureOutlier]:
+        """
+        Detect outlier signatures using cluster-based analysis.
+        
+        A signature is considered an outlier if its average similarity
+        to other signatures in the group is significantly below the group average.
+        
+        Args:
+            group: SignatureGroup to analyze
+            comparisons: Pre-computed pairwise comparisons
+            
+        Returns:
+            List of SignatureOutlier objects
+        """
+        if len(group.signatures) < 3:
+            return []  # Need at least 3 signatures to detect outliers
+        
+        if not comparisons:
+            return []  # No comparisons available (no images)
+        
+        # Build similarity matrix from existing comparisons
+        similarities: Dict[str, List[float]] = defaultdict(list)
+        
+        for comp in comparisons:
+            similarities[comp.signature_a_id].append(comp.similarity_score)
+            similarities[comp.signature_b_id].append(comp.similarity_score)
+        
+        if not similarities:
+            return []
+        
+        # Compute average similarity per signature
+        avg_scores: Dict[str, float] = {}
+        for sig_id, scores in similarities.items():
+            if scores:
+                avg_scores[sig_id] = np.mean(scores)
+        
+        if not avg_scores:
+            return []
+        
+        # Compute group statistics
+        all_avgs = list(avg_scores.values())
+        group_avg = np.mean(all_avgs)
+        std = np.std(all_avgs)
+        
+        # Threshold: below group_avg - 1.5 * std, but at least 0.4
+        threshold = max(0.4, group_avg - 1.5 * std)
+        
+        # Find outliers
+        outliers = []
+        for sig in group.signatures:
+            sig_id = sig.signature_id
+            if sig_id in avg_scores and avg_scores[sig_id] < threshold:
+                outliers.append(SignatureOutlier(
+                    signature_id=sig_id,
+                    page=sig.page_number,
+                    avg_similarity=avg_scores[sig_id],
+                    reason=f"Low similarity ({avg_scores[sig_id]:.2f}) vs group avg ({group_avg:.2f})"
+                ))
+        
+        return outliers
     
     def _compare_signatures(
         self,

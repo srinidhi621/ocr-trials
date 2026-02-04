@@ -27,16 +27,44 @@
   - “Signature coverage” per page (candidates vs. confirmed).
   - “Signer stability” score per signer group.
 
-### 2) Local UI (Lightweight) [DONE]
-- Single‑page local UI (no cloud hosting).
-- Upload PDF, start pipeline, stream logs/progress.
-- Show run ID and link to full output folder.
-- Provide direct links to:
-  - `*_extracted.md`
-  - `*_extracted.json`
-  - `signatures/` directory and/or signature report
-- Basic error handling and retry.
-- Ensure `.env` and outputs remain local only.
+### 2) Local UI (Lightweight) [NEEDS REBUILD]
+Single-page Flask UI for running the OCR pipeline locally.
+
+#### Functional Requirements
+1. **PDF Upload**: File input to select a PDF document
+2. **Configuration Options**:
+   - Provider: dropdown (azure, vertex)
+   - DPI: number input (default 300, range 150-600)
+   - Enhance: checkbox (default checked)
+   - Save Artifacts: checkbox
+   - Signature Report: checkbox (default checked)
+3. **Run Pipeline**: Button that triggers `main.run_pipeline()` in a background thread
+4. **Progress Display**:
+   - Run ID (generated from filename + provider + timestamp)
+   - Status indicator (queued → running → completed/failed)
+   - Log output area (tail of `{run_id}.log` file, auto-scroll)
+   - Progress bar with elapsed time and ETA estimate
+5. **Output Links** (after completion):
+   - `*_extracted.md` - rendered as HTML
+   - `*_extracted.json` - syntax highlighted
+   - `*_signature_report.md` - rendered as HTML
+   - `signatures/` directory listing
+
+#### Technical Requirements
+- Flask backend on port 5001 (configurable via PORT env var)
+- Pipeline runs in daemon thread (non-blocking)
+- Status polling via `/status/<run_id>` endpoint (every 2s)
+- Outputs served via `/view/<run_id>/<path>` with proper rendering
+- Support page refresh / browser private mode (persist run state to disk, not just memory)
+- Scripts: `scripts/ui_up.sh` and `scripts/ui_down.sh` for start/stop
+
+#### API Endpoints
+- `GET /` - Serve the HTML page
+- `POST /run` - Upload PDF, start pipeline, return JSON `{run_id, status, output_dir}`
+- `GET /status/<run_id>` - Return JSON `{run_id, status, log, output_dir, error}`
+- `GET /outputs/<run_id>` - Return JSON list of output files with view URLs
+- `GET /view/<run_id>/<path>` - Render markdown/JSON or serve file
+- `GET /files/<run_id>/<path>` - Serve raw file or directory listing
 
 ### 3) Final Review Pass (Vision LLM)
 - Add optional “final review” pass that:

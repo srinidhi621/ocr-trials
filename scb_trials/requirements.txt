@@ -28,3 +28,5 @@ rich>=13.0.0
 # Local UI
 Flask>=3.0.0
 gunicorn>=21.0.0
+Markdown>=3.6
+Pygments>=2.17.0

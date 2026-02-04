@@ -28,6 +28,7 @@ class SignatureReportConfig:
     signatures_dir: str = "signatures"  # Directory name for signature images
     generate_markdown: bool = True  # Generate Markdown report
     generate_json: bool = True  # Generate JSON report
+    compact_mode: bool = True  # Generate simplified summary-only reports
 
 
 class SignatureReportGenerator:
@@ -164,11 +165,16 @@ class SignatureReportGenerator:
         output_path: Path
     ):
         """Write JSON report to file."""
-        report_dict = report.to_dict(include_images=self.config.include_base64_images)
-        
-        # Clean up the report for JSON serialization
-        if not self.config.include_comparison_matrix:
-            report_dict.pop("comparison_matrix", None)
+        if self.config.compact_mode:
+            # Compact mode: simplified summary-only format
+            report_dict = report.to_dict(compact=True)
+        else:
+            # Full mode: include all details
+            report_dict = report.to_dict(include_images=self.config.include_base64_images)
+            
+            # Clean up the report for JSON serialization
+            if not self.config.include_comparison_matrix:
+                report_dict.pop("comparison_matrix", None)
         
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(report_dict, f, indent=2, ensure_ascii=False)
@@ -180,6 +186,84 @@ class SignatureReportGenerator:
         output_dir: str
     ):
         """Write Markdown report to file."""
+        if self.config.compact_mode:
+            self._write_compact_markdown_report(report, output_path, output_dir)
+        else:
+            self._write_full_markdown_report(report, output_path, output_dir)
+    
+    def _write_compact_markdown_report(
+        self,
+        report: SignatureAnalysisReport,
+        output_path: Path,
+        output_dir: str
+    ):
+        """Write concise Markdown report with discrepancy column."""
+        lines = []
+        
+        # Header
+        lines.append("# Signature Consistency Report")
+        lines.append("")
+        lines.append(f"**Source:** {report.source_file} | **Date:** {report.extraction_date[:10]}")
+        lines.append(f"**Total Signatures:** {report.total_signatures} | **Unique Signers:** {report.unique_signers}")
+        lines.append("")
+        
+        # Main summary table with discrepancies
+        if report.signature_groups:
+            lines.append("| Role | Count | Pages | Consistency | Discrepancies |")
+            lines.append("|------|-------|-------|-------------|---------------|")
+            
+            for group in report.signature_groups:
+                role = group.designation or group.identifier
+                pages_str = ", ".join(str(p) for p in group.pages)
+                consistency = f"{group.average_similarity:.2f}" if group.average_similarity > 0 else "-"
+                
+                # Format discrepancies
+                if group.outliers:
+                    discrepancies = "; ".join(
+                        f"Page {o.page} (outlier: {o.avg_similarity:.2f})"
+                        for o in group.outliers
+                    )
+                else:
+                    discrepancies = "-"
+                
+                lines.append(
+                    f"| {role} | {len(group.signatures)} | {pages_str} | "
+                    f"{consistency} | {discrepancies} |"
+                )
+            
+            lines.append("")
+        else:
+            lines.append("*No signatures detected in this document.*")
+            lines.append("")
+        
+        # Discrepancy details section (only if there are outliers)
+        has_outliers = any(group.outliers for group in report.signature_groups)
+        if has_outliers:
+            lines.append("---")
+            lines.append("")
+            lines.append("## Discrepancy Details")
+            lines.append("")
+            
+            for group in report.signature_groups:
+                if group.outliers:
+                    role = group.designation or group.identifier
+                    lines.append(f"### {role}")
+                    lines.append("")
+                    for outlier in group.outliers:
+                        lines.append(f"- **Page {outlier.page}**: {outlier.reason}")
+                    lines.append("")
+        
+        # Write to file
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+    
+    def _write_full_markdown_report(
+        self,
+        report: SignatureAnalysisReport,
+        output_path: Path,
+        output_dir: str
+    ):
+        """Write full detailed Markdown report (legacy mode)."""
         lines = []
         
         # Header
