@@ -106,11 +106,17 @@ def run_pipeline(
     verbose: bool = False,
     run_id: Optional[str] = None,
     show_console: bool = True,
+    parallel: bool = True,  # Task 9.4: Enable parallel page processing by default
+    max_workers: int = 3,   # Task 9.4: Max parallel workers (conservative for rate limits)
 ) -> Dict[str, Any]:
     """
     Run the OCR pipeline programmatically.
     
     Returns a dict with run_id, output_dir, output_paths, and elapsed_time.
+    
+    Task 9 Optimizations:
+    - parallel: Enable parallel page processing (9.4)
+    - max_workers: Control parallelism (default 3 for rate limits)
     """
     start_time = time.time()
     console = Console() if show_console else Console(file=io.StringIO())
@@ -136,6 +142,7 @@ def run_pipeline(
     logger.info(f"Output Directory: {output_path}")
     logger.info(f"Signature Report: {signature_report}")
     logger.info(f"Save Artifacts: {save_artifacts}")
+    logger.info(f"Parallel Processing: {parallel} (max_workers={max_workers})")
     
     # Display header
     if show_console:
@@ -205,16 +212,27 @@ def run_pipeline(
                 # Enhanced signature detection settings
                 signature_detection_method="hybrid",  # Use both CV and LLM
                 signature_page_region="lower_half",
+                # Task 9 Performance Optimizations (never sacrifice accuracy)
+                skip_llm_scan_if_found=True,  # 9.2: Skip redundant LLM scan
+                batch_signature_validation=True,  # 9.1: Batch CV candidates
+                batch_table_enhancement=True,  # 9.5: Batch tables
+                skip_text_overlap_regions=True,  # 9.3: Filter text overlaps
             )
             logger.info(f"Extractor config: signature_method={extractor_config.signature_detection_method}, save_signatures={extractor_config.save_signatures}")
+            logger.info(f"Optimizations: batch_signatures={extractor_config.batch_signature_validation}, batch_tables={extractor_config.batch_table_enhancement}, skip_llm_if_found={extractor_config.skip_llm_scan_if_found}")
             
             extractor = Extractor(provider=ocr_provider, config=extractor_config)
             
-            logger.info(f"Starting extraction of {len(pages)} pages...")
+            logger.info(f"Starting extraction of {len(pages)} pages (parallel={parallel})...")
             if verbose and show_console:
                 console.print(f"  Extracting content using {provider.upper()}...")
             
-            extraction_result = extractor.extract_document(pages, pdf_path)
+            extraction_result = extractor.extract_document(
+                pages, 
+                pdf_path,
+                parallel=parallel,
+                max_workers=max_workers
+            )
             progress.update(task2, completed=100)
             
             table_count = sum(len(p.tables) for p in extraction_result.pages)
@@ -228,6 +246,17 @@ def run_pipeline(
             logger.info(f"  - Signatures detected: {sig_count}")
             logger.info(f"  - Redactions: {redaction_count}")
             logger.info(f"  - Overall confidence: {extraction_result.overall_confidence:.2%}")
+            
+            # Task 9.6: Log timing summary
+            if extraction_result.metadata.get('timing_summary'):
+                timing_summary = extraction_result.metadata['timing_summary']
+                logger.info(f"  - Extraction time: {extraction_result.metadata.get('extraction_time_seconds', 0):.1f}s")
+                logger.info(f"  - Timing breakdown:")
+                logger.info(f"      DI Layout: {timing_summary.get('di_layout_ms', 0):.0f}ms")
+                logger.info(f"      CV Detection: {timing_summary.get('cv_signature_detection_ms', 0):.0f}ms")
+                logger.info(f"      Signature Validation: {timing_summary.get('signature_validation_ms', 0):.0f}ms ({timing_summary.get('signature_validation_count', 0)} candidates)")
+                logger.info(f"      LLM Signature Scan: {timing_summary.get('llm_signature_scan_ms', 0):.0f}ms ({timing_summary.get('llm_scans_skipped', 0)} skipped)")
+                logger.info(f"      Table Enhancement: {timing_summary.get('table_enhancement_ms', 0):.0f}ms ({timing_summary.get('table_enhancement_count', 0)} tables)")
             
             # Log individual page details
             for page in extraction_result.pages:
@@ -460,6 +489,17 @@ def get_provider(provider_name: str):
     is_flag=True,
     help='Verbose output'
 )
+@click.option(
+    '--parallel/--no-parallel',
+    default=True,
+    help='Enable parallel page processing (default: enabled)'
+)
+@click.option(
+    '--max-workers',
+    type=int,
+    default=3,
+    help='Maximum parallel workers (default: 3)'
+)
 def main(
     pdf_path: str,
     provider: str,
@@ -468,7 +508,9 @@ def main(
     output_dir: str,
     save_artifacts: bool,
     signature_report: bool,
-    verbose: bool
+    verbose: bool,
+    parallel: bool,
+    max_workers: int
 ):
     """
     Extract content from a scanned PDF document.
@@ -486,6 +528,8 @@ def main(
             signature_report=signature_report,
             verbose=verbose,
             show_console=True,
+            parallel=parallel,
+            max_workers=max_workers,
         )
     except Exception as e:
         sys.exit(1)
