@@ -366,6 +366,21 @@ class Reviewer:
             "needs_review": confidence_report.needs_review(),
             "warnings": confidence_report.warnings
         }
+        
+        # Task 9.6: Add timing instrumentation to confidence report
+        if extraction and extraction.metadata:
+            timing_data = {}
+            if 'timing_summary' in extraction.metadata:
+                timing_data['summary'] = extraction.metadata['timing_summary']
+            if 'timing' in extraction.metadata:
+                timing_data['per_page'] = extraction.metadata['timing']
+            if 'extraction_time_seconds' in extraction.metadata:
+                timing_data['total_extraction_seconds'] = extraction.metadata['extraction_time_seconds']
+            if 'parallel_processing' in extraction.metadata:
+                timing_data['parallel_processing'] = extraction.metadata['parallel_processing']
+            if timing_data:
+                report_data['timing'] = timing_data
+        
         report_path.write_text(
             json.dumps(report_data, indent=2),
             encoding='utf-8'

@@ -106,12 +106,72 @@ Single-page Flask UI for running the OCR pipeline locally.
 - Ensure detailed comparisons map to the correct signature pairs.
 - Include coverage + consistency metrics from workstream #1.
 
+### 9) Pipeline Latency Optimization (High Priority) [DONE]
+- Goal: Reduce 11-page document processing from ~15 min to <5 min.
+- Current bottleneck analysis (Stage 2 Extraction consumes ~90% of runtime):
+  - Azure DI calls: 11 pages × ~5s = ~55s
+  - Table LLM enhancement: 13 tables × ~5s = ~65s
+  - Signature candidate validation: **~50 candidates × ~6s = ~300s (5 min)**
+  - Full-page LLM signature scan: 11 pages × ~6s = ~66s
+
+#### 9.1) Batch Signature Validation (Highest Impact)
+- Current: Each CV-detected candidate triggers an individual LLM call.
+- Change: Batch multiple candidates into a single LLM call per page.
+- Implementation:
+  - Collect all CV candidates for a page into a grid/montage image.
+  - Send one prompt: "Which of these N regions are actual signatures?"
+  - Parse response to filter valid signatures.
+- Expected savings: ~4 minutes for 11-page document.
+
+#### 9.2) Conditional LLM Signature Scan
+- Current: `_detect_signatures_with_llm()` runs on every page even after CV+DI detection.
+- Change: Skip full-page LLM scan if DI or CV already found signatures on that page.
+- Add a config flag: `skip_llm_scan_if_found: bool = True`.
+- Expected savings: ~1 minute for 11-page document.
+
+#### 9.3) Tighten CV Detection Thresholds
+- Current thresholds are too permissive (catching 40-50+ false positives):
+  - `signature_ink_density_min: 0.01` → increase to `0.03`
+  - `signature_fill_ratio_min: 0.1` → increase to `0.15`
+  - `signature_aspect_ratio_min: 1.0` → increase to `1.5`
+- Add additional filters:
+  - Skip regions that overlap with detected text blocks.
+  - Skip regions smaller than typical signature size (e.g., <100px width).
+- Expected savings: Fewer candidates = fewer LLM calls.
+
+#### 9.4) Parallel Page Processing
+- Current: Pages processed sequentially in a `for` loop.
+- Change: Use `concurrent.futures.ThreadPoolExecutor` to process pages in parallel.
+- Considerations:
+  - Azure DI and OpenAI have rate limits; use `max_workers=3` initially.
+  - Ensure thread-safe signature counter and output file writes.
+- Expected savings: ~40-50% reduction in wall-clock time.
+
+#### 9.5) Batch Table Enhancement
+- Current: Each table triggers a separate LLM call for Markdown enhancement.
+- Change: For pages with multiple tables, send all table crops in one call.
+- Fallback: If batch response is malformed, retry individually.
+
+#### 9.6) Add Timing Instrumentation
+- Add per-stage timing logs to identify regressions:
+  - `STAGE 2a: DI Layout - 5.2s`
+  - `STAGE 2b: CV Signature Detection - 0.3s`
+  - `STAGE 2c: Signature Validation (12 candidates) - 42.1s`
+  - `STAGE 2d: Table Enhancement (3 tables) - 15.8s`
+- Store timing breakdown in `*_confidence.json` output.
+
+#### Success Metrics
+- Target: 11-page document completes in <5 minutes (down from ~15 min).
+- Track: LLM calls per page (target: ≤3 per page).
+- Track: Signature candidates vs. confirmed ratio (target: <2:1).
+
 
 ## Deliverables
 - Updated pipeline modules with improved detection and fidelity.
 - Golden tests + regression harness.
 - Documented metrics in output JSON (coverage, integrity flags).
 - Local UI for upload, progress, and report links.
+- Optimized pipeline with <5 min processing for 11-page documents.
 
 ## Timeline (Suggested)
 - Phase 1 (2–4 days): Signature detection + consistency upgrades (priority).
@@ -119,3 +179,4 @@ Single-page Flask UI for running the OCR pipeline locally.
 - Phase 3 (1–2 days): Table fidelity updates.
 - Phase 4 (2–3 days): Golden tests + financial coverage.
 - Phase 5 (1–2 days): Redaction + signature report consistency.
+- Phase 6 (2–3 days): Pipeline latency optimization (batch signatures, parallelization).
